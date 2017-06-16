@@ -156,8 +156,7 @@ def extract_plate_candidates(img, contours, conf):
         rot_mat = cv2.getRotationMatrix2D(r_center, -tau, 1.0)
         rotated = cv2.warpAffine(img, rot_mat, (0, 0))
 
-
-        # Then we crop again
+        # Then we crop our ROI
         candidate = cv2.getRectSubPix(rotated, r_size, r_center)
         if conf['debug']:
             _plot(candidate)
