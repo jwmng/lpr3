@@ -11,20 +11,8 @@ import matplotlib.pyplot as plt
 
 ## TODO:
 # - MinAreaRect
-# - Approx-to-PolyLDP
 # - Fix inversion
 
-# loop over our contours
-# for c in cnts:
-	# # approximate the contour
-	# peri = cv2.arcLength(c, True)
-	# approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-
-	# # if our approximated contour has four points, then
-	# # we can assume that we have found our screen
-	# if len(approx) == 4:
-		# screenCnt = approx
-		# break
 
 def _plot(img, **kwargs):
     plt.figure()
@@ -69,8 +57,8 @@ def _match_single_character(char, templates):
         score = matches/(max_h*max_w)
 
         char_scores.append((label, score))
-        char_scores = sorted(char_scores, key=lambda x: x[1], reverse=True)
 
+    char_scores = sorted(char_scores, key=lambda x: x[1], reverse=True)
     return char_scores
 
 
@@ -98,7 +86,6 @@ def read_image(path, conf):
         np.array: Image data in pixels (0...255, grayscale)
     """
     img = cv2.imread(path, 0)
-    _plot(img)
 
     # Normalise, then back to uint8
     img = img.astype(np.float64)
@@ -122,18 +109,27 @@ def get_plate_contours(img, conf):
     # Contours on threshold image
     _, threshold_image = cv2.threshold(img, 0, 255,
                                        cv2.THRESH_OTSU)
+
     _, contours, _ = cv2.findContours(threshold_image,
                                       cv2.RETR_LIST,
                                       cv2.CHAIN_APPROX_SIMPLE)
+
+    # Fit to polynomial
+    fitted = []
+    for cnt in contours:
+        perimeter = cv2.arcLength(cnt, True)
+        fit = cv2.approxPolyDP(cnt, float(conf['max_fit_deviation'])*perimeter,
+                               True)
+        fitted.append(fit)
 
     if conf['verbose']:
         print("Got %d contours" % len(contours))
 
     if conf['debug']:
-        contour_img = cv2.drawContours(.3*threshold_image, contours, -1, [255])
+        contour_img = cv2.drawContours(.3*threshold_image, fitted, -1, [255])
         _plot(contour_img, cmap='Greys')
 
-    return (img, contours)
+    return (img, fitted)
 
 
 def extract_plate_candidates(img, contours, conf):
@@ -143,22 +139,41 @@ def extract_plate_candidates(img, contours, conf):
 
     plate_candidates = []
     for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-
-        candidate = img[y:y+h, x:x+w]
 
         # Too small
         if cv2.contourArea(cnt) < int(conf['early_reject_min_area']):
             continue
 
+        r_center, r_size, tau = cv2.minAreaRect(cnt)
+        r_size = tuple(int(i) for i in r_size)
+
+        # We want the long edge to be flat
+        if abs(tau) > 45 or r_size[0] < r_size[1]:
+            r_size = r_size[::-1]
+            tau = tau + (-90 if tau > 0 else 90)
+
+        w, h = r_size
+        rot_mat = cv2.getRotationMatrix2D(r_center, -tau, 1.0)
+        rotated = cv2.warpAffine(img, rot_mat, (0, 0))
+
+
+        # Then we crop again
+        candidate = cv2.getRectSubPix(rotated, r_size, r_center)
+        if conf['debug']:
+            _plot(candidate)
+
         # Bad width
         if not _check_tol(w, int(conf['width.target']),
                           float(conf['width.tolerance'])):
+            if conf['debug']:
+                print("Bad width")
             continue
 
         # Bad height
         if not _check_tol(h, int(conf['height.target']),
                           float(conf['height.tolerance'])):
+            if conf['debug']:
+                print("Bad height")
             continue
 
         # Bad aspect ratio
@@ -166,6 +181,8 @@ def extract_plate_candidates(img, contours, conf):
         if not _check_tol(aspect_ratio,
                           float(conf['aspect_ratio.target']),
                           float(conf['aspect_ratio.tolerance'])):
+            if conf['debug']:
+                print("Bad Aspect ratio")
             continue
 
         if conf['debug']:
@@ -225,17 +242,20 @@ def segment_plate_candidates(candidates, conf):
                               float(conf['letter_size_tolerance'])):
                 continue
 
-            # Possibly a character, resize, threshold, save for matching
+            # Possibly a character, de-border resize, threshold, add to result
             char = cand_threshold[y:y+h, x:x+w]
+
+            # Remove black border
+            char = char[np.ix_((char < 128).any(1), (char < 128).any(0))]
 
             scale = 30/char.shape[0]
             char = cv2.resize(char, (0, 0), fx=scale, fy=scale,
                               interpolation=cv2.INTER_NEAREST)
+            _, char = cv2.threshold(char, 0, 255, cv2.THRESH_OTSU)
 
             if conf['debug']:
                 _plot(char)
 
-            # _, char = cv2.threshold(char, np.mean(char), 255, 0)
             cand_chars.append((char, x))
 
         if conf['verbose']:
