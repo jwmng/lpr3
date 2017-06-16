@@ -205,8 +205,7 @@ def segment_plate_candidates(candidates, conf):
         cand_chars = []
 
         # Otsu binarization
-        _, cand_threshold = cv2.threshold(candidate, 0,
-                                          255, cv2.THRESH_OTSU)
+        _, cand_threshold = cv2.threshold(candidate, 0, 255, cv2.THRESH_OTSU)
         if conf['debug']:
             _plot(cand_threshold)
 
