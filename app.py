@@ -9,15 +9,12 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 
-## TODO:
-# - MinAreaRect
-# - Fix inversion
 
-
-def _plot(img, **kwargs):
+def _plot(img, title="", **kwargs):
     plt.figure()
     kwargs.update({'cmap': 'Greys'})
     plt.imshow(img, **kwargs)
+    plt.title(title)
     plt.show()
 
 
@@ -36,6 +33,7 @@ def _match_single_character(char, templates):
     _, char = cv2.threshold(char, 0, 255, cv2.THRESH_OTSU)
 
     for label, temp_l in templates.items():
+
         template = np.array(temp_l)
 
         # We only compare the parts of the images that overlap, starting at the
@@ -103,12 +101,22 @@ def read_image(path, conf):
 def get_plate_contours(img, conf):
     """ Find contours in the image `img` """
 
+    # Precrop
+    x1, y1, x2, y2 = np.asarray(np.matrix(conf['precrop'])[0])[0]
+    img = img[y1:y2, x1:x2]
+
     # Prewarp
     img = cv2.warpPerspective(img, np.matrix(conf['prewarp']), img.shape[::-1])
 
-    # Contours on threshold image
-    _, threshold_image = cv2.threshold(img, 0, 255,
-                                       cv2.THRESH_OTSU)
+    # Preblur
+    img = cv2.GaussianBlur(img, (3, 3), 0)
+
+    # Threshold
+    _, threshold_image = cv2.threshold(img, 124, 255,
+                                       cv2.ADAPTIVE_THRESH_MEAN_C)
+
+    # Erode to make plate stand out more
+    threshold_image = cv2.erode(threshold_image, np.ones((2, 2)), iterations=2)
 
     _, contours, _ = cv2.findContours(threshold_image,
                                       cv2.RETR_LIST,
@@ -117,9 +125,7 @@ def get_plate_contours(img, conf):
     # Fit to polynomial
     fitted = []
     for cnt in contours:
-        perimeter = cv2.arcLength(cnt, True)
-        fit = cv2.approxPolyDP(cnt, float(conf['max_fit_deviation'])*perimeter,
-                               True)
+        fit = cv2.approxPolyDP(cnt, int(conf['max_fit_deviation']), True)
         fitted.append(fit)
 
     if conf['verbose']:
@@ -230,6 +236,22 @@ def segment_plate_candidates(candidates, conf):
         for ccnt in char_contours:
             x, y, w, h = cv2.boundingRect(ccnt)
 
+            # Rectify character
+            r_center, r_size, tau = cv2.minAreaRect(ccnt)
+
+            char = cand_threshold[y:y+h, x:x+w]
+            r_center = (r_center[0] - x, r_center[1] - y)
+
+            if abs(tau) > 45:
+                tau = tau + (-90 if tau > 0 else 90)
+
+            rot_mat = cv2.getRotationMatrix2D(r_center, tau, 1.0)
+            char = cv2.warpAffine(char, rot_mat, (0, 0),
+                                  borderMode=cv2.BORDER_CONSTANT,
+                                  borderValue=(255, 255, 255))
+
+            h, w = r_size
+
             # Bad character width
             if not _check_tol(w, int(conf['letter_width']),
                               float(conf['letter_size_tolerance'])):
@@ -240,8 +262,9 @@ def segment_plate_candidates(candidates, conf):
                               float(conf['letter_size_tolerance'])):
                 continue
 
-            # Possibly a character, de-border resize, threshold, add to result
-            char = cand_threshold[y:y+h, x:x+w]
+
+            # Erode to remove antialiasing gaps
+            char = cv2.morphologyEx(char, cv2.MORPH_CLOSE, np.ones((3, 3)))
 
             # Remove black border
             char = char[np.ix_((char < 128).any(1), (char < 128).any(0))]
@@ -249,10 +272,10 @@ def segment_plate_candidates(candidates, conf):
             scale = 30/char.shape[0]
             char = cv2.resize(char, (0, 0), fx=scale, fy=scale,
                               interpolation=cv2.INTER_NEAREST)
-            _, char = cv2.threshold(char, 0, 255, cv2.THRESH_OTSU)
+            _, char = cv2.threshold(char, 128, 255, cv2.THRESH_BINARY)
 
             if conf['debug']:
-                _plot(char)
+                _plot(char, title="Char found at x=%d" % x)
 
             cand_chars.append((char, x))
 
